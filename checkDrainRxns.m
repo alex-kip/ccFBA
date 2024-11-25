@@ -15,10 +15,10 @@ end
 isDrain=zeros(length(model.rxns),1);
 
 for i = 1:size(model.rxns,1)
-    substrates = find(model.S(:,i) < 0);
-    products = find(model.S(:,i) > 0);
+    substrates = find(model.S(:,i) < 0);%vriskei se kathe sthlh(antidrash) tous metabolites poy antidroyn(tous metavolites me s.s <0)
+    products = find(model.S(:,i) > 0);%;%vriskei se kathe sthlh(antidrash) tous metabolites poy paragontai(tous metavolites me s.s >0)
     
-    if isempty(substrates) || isempty(products)
+    if isempty(substrates) || isempty(products) % den to katalavainw
         isDrain(i,1) = 1;
     else
         isDrain(i,1) = 0;
