@@ -65,7 +65,17 @@ for i=1:length(rxns)
                 comps{j,1} = met(end);
             end
             if size(unique(comps),1) > 1
-                isTrans(i,1) = 1;
+                 isTrans(i,1) = 1;
+                 if size(unique(comps),1) == 2
+                    if ismember({'h';'u'},comps) | ismember({'h';'s'},comps) | ismember({'s';'u'},comps) 
+                         isTrans(i,1) = 0;
+                    end
+                 end
+                        if size(unique(comps),1) ==3
+                            if ismember({'h';'u';'s'},comps)
+                        isTrans(i,1) = 0;
+                            end
+                        end
             else
                 isTrans(i,1) = 0;
             end

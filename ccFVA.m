@@ -1,4 +1,4 @@
-function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,cofPairs,minmax,runInitMM,runFinalMinMax,limEX,totalCarbon,intBnds,skipRxns,delimiter)
+function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,cofPairs,minmax,runInitMM,runFinalMinMax,limEX,totalCarbon,skipRxns,CBBRxns,delimiter,SearchProb_rxns)
 %% This script is designed to constrain the solution space based on the 
 %   number of carbon atoms made available to the model by the exchange
 %   reactions. This is done in order to avoid physiologically meaningless
@@ -9,14 +9,17 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 % INPUT
 %   model       =   cobra model (must contain model.metFormulas)
 %
+%   
+%   
+%                   
+% OPTIONAL
+%   
 %   bnds        =   bounds or constraints as cell or double. for double 
 %                   first row corresponds to rxnIDs, second row to lower 
 %                   and the third row to upper bnds. These bounds should 
 %                   only contain are only uptake and secretion rates.
 %                   Otherwise intracellular constraints are potentially 
 %                   taken into the calculation of totalCarbon uptaken
-%
-% OPTIONAL
 %
 %   condition   =   string containing information as to which condition is 
 %                   run (e.g. lactate producing conditon)
@@ -47,7 +50,7 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %   minmax      =   FVA for model under experimental constraints. (needs 
 %                   to be processed with fixMinMax.m). If not passed into
 %                   the function it will create said structure by running
-%                   runMinMax_GF.m (alternative to fluxvariability.m). 
+%                   runMinMax.m (alternative to fluxvariability.m). 
 %
 %   runInitMM   =   Logical input true or false (1 or 0). Default = 1. This
 %                   variable get only evaluated if minmax variable is empty
@@ -58,7 +61,7 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %                   (lb and ub vecotrs will be used to creat the minmax
 %                   variable).
 %
-%   runFinalMM  =   logical true or false. if ture a final MinMax (FVA)
+%   runFinalMM  =   logical true or false. if true a final MinMax (FVA)
 %                   will be run
 %
 %   limEX       =   value to be used to constrain drain rxns. This is
@@ -72,12 +75,15 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %                   generally calculated based on the input bounds for
 %                   exchange reactions but can be input here manually. 
 %
-%   intBnds     =   bnds used to constrain all unconstraint reactions.
-%                   Default value is 100.
 %
 %   skipRxns    =   vector of doubles that denote reactions that are to be
 %                   skipped for carbon constraining (could be ussed for
-%                   reactions without a chemical formula for example)
+%                   reactions without a chemical formula for example or the
+%                   biomass reaction (skipped by deafault))
+%  
+%   CBBRxns     =   Extension for Calvin Cycle under autotrophic conditions. 
+%                   Vector of doubles that denote reactions involved in the
+%                   Calvin Cycle.
 %
 %   delimiter   =   This variables default is '_' meaning metaboites in the
 %                   input model are contain the compartment information
@@ -85,6 +91,11 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %                   models come with other delimiter such as square
 %                   brackets (e.g. glc_D[c], nadh[m]) and therfore this 
 %                   input should be carefully checked.
+%        
+% SearchProb_rxns = This Variables default is true, meaning that IF there
+%                   is infeasibility or reduced Objective Value created by the post_CCFVA bounds,
+%                   it searches for possible Rxns that create the problem.
+%
 % 
 % OUTPUT
 %   carbonConst =   structure containing the following fields
@@ -138,14 +149,22 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %                         to constrain the Exchange reactions output)
 %                       - number of EX bnds adjusted
 %                       - solSpaceReductionEX in % compared to original
+%                       - Problematic_rxns: Reactions that may drop the
+%                         objective value when constrained
 %                       - EXspaceReduction (how much has the space shrunk
 %                         just comparing old EX ranges with new ones
 %                       - post New MinMax -> title
-%                       - postNewMinMax (new minmax run with runMinMax_GF
+%                       - postNewMinMax (new minmax run with runMinMax
 %                         and cc bnds)
 %                       - solSpacereductionPostCC
 %                       - solutionPostNew
 %
+%                            
+%                           -----------------------------------------------------------
+%                            This code is publicly available and is the
+%                            property of the Laboratory of Biochemical
+%                            Engineering©  https://lbe.cheng.auth.gr/
+%                            
 %
 % CHANGE LOG
 %
@@ -164,18 +183,18 @@ function [carbonConst] = ccFVA(model,bnds,condition,carbonCount,rlxBnds,rlxInt,c
 %               the mdels lower and upper bounds
 %
 %   24-Mar-19   Addtion of delimiter variable       Maximilian Lularevic
-%               was added tot he function
+%               was added to the function
+%
+%   Jul-2022    Addition of Calvin Cycle            Giannis Vourvachakis
+%               constraint methodology.
+%
+%   July-2023   Change in findLrgMlcs. Now the
+%               function can find also antiport
+%               reactions.                          Nikolaos Stratis
 %
 
 %% check if minmax was passed into function and, run minmax if it hasn't
 
-if exist('intBnds','var')
-    if isempty(intBnds)
-        intBnds = 100;
-    end
-else
-    intBnds = 100;
-end
 
 if exist('runInitMM','var')
     if isempty(runInitMM)
@@ -186,20 +205,36 @@ else
 end
 
 [~,num_rxns] = size(model.S);
-model = resetModel(model,intBnds);
+% Prepare model for ccFVA (add the given bounds and find directionality of
+% the Rxns
+[~,model] = PrepareModel(model);
+
+% if Variable bnds is passed into the function  and its empty then find
+% the bnds
+
+if exist('bnds','var')
+    if isempty(bnds)
+     [bnds,model] = PrepareModel(model);    
+    end
+else 
+     [bnds,model] = PrepareModel(model);   
+end
+
+
+% load those constraints 
 model = loadConstraints(model,bnds,'FBA');
 if exist('minmax','var')
     if isempty(minmax)
         if runInitMM
-            minmax = runMinMax_GF(model);
+            minmax = runMinMax(model);
             minmax = fixMinMax(minmax);
         else
             minmax = [model.lb,model.ub];
         end
     end
 else
-    if runInitMm
-        minmax = runMinMax_GF(model);
+    if runInitMM
+        minmax = runMinMax(model);
         minmax = fixMinMax(minmax);
     else
         minmax = [model.lb,model.ub];
@@ -248,7 +283,7 @@ end
 % check if there are any rxns to be skipped
 if exist('skipRxns','var')
     if isempty(skipRxns)
-        skipRxns = [];
+        skipRxns = find(model.c ==1);  %skip the biomass equation
     else
         [s,z] = size(skipRxns);
         if z > s
@@ -256,9 +291,20 @@ if exist('skipRxns','var')
         end
     end
 else
-    skipRxns = [];
+    skipRxns = find(model.c == 1);  
 end
-
+if exist('CBBRxns','var')
+   if isempty(CBBRxns)
+        CBBRxns = [];
+    else
+        [s,z] = size(CBBRxns);
+        if z > s
+            CBBRxns = CBBRxns';
+        end
+    end
+else
+    CBBRxns = [];
+end  
 % check if delimiter variable was put into function
 if exist('delimiter','var')
     if isempty(delimiter)
@@ -268,7 +314,14 @@ else
     delimiter = '_';
 end
 
-
+% check if SearchProb_rxns was passed into function
+if exist('SearchProb_rxns','var')
+    if isempty(SearchProb_rxns)
+        SearchProb_rxns = 1;
+    end 
+else
+    SearchProb_rxns = 1;
+end
 
 %% extract lower and upper bnds from bnds variable
 if iscell(bnds)
@@ -289,7 +342,7 @@ if iscell(bnds)
 elseif isnumeric(bnds)
     varID = bnds(:,1);
     varMin = bnds(:,2);
-    varMax = bnds(:,3);
+    varMax = bnds(:,3);   
 end
 varID_tmp = varID;
 %% find corresponding metIDs from varIDs
@@ -304,7 +357,7 @@ varMax(noExRxns) = [];
 isDrainNew = isDrain(~ismember(isDrain,varID));
 
 %% check if number of carbon atoms per metabolite was passed into function
-if exist('carbonCount','var')
+if exist('carbonCount','var') 
     if isempty(carbonCount)
         carbonCount = findMetCarbon(model);
     end
@@ -312,6 +365,7 @@ else
     carbonCount = findMetCarbon(model);
 end
 % extract the carbon vector (length of model.mets)
+
 metCarb = carbonCount.carbonAtoms;
 
 %% multiply the lower and upper bnds witht their respective number of carbon
@@ -334,20 +388,23 @@ if exist('totalCarbon','var')
     end
 else
     total_carbon_cons = abs(sum(varMinCarb(varMinCarb<0)));
+    intotal_carbon_cons=total_carbon_cons;
 end
-%% check if cofactorPairs have been passed on and set cofactors to 0 in model.S
+total_carbon_cons=total_carbon_cons;
+intotal_carbon_cons=total_carbon_cons; %initial total carbon consumed (might be followed by relaxation)
+%% check if cofactorPairs have been passed on 
 
 % check for cofPair variable and/or calculate new
 if exist('cofPairs','var')
     if isempty(cofPairs)
-        smallMets = findSmallMets(model);
-        metPairs = findMPs_max(model,smallMets.smallMetIDs,true,delimiter);
-        cofPairs = findCofactorPairs_max(model,metPairs);
+        smallMets = findSmallMetsCarb(model);
+        metPairs = findMPs(model,smallMets.smallMetIDs,false,delimiter);
+        cofPairs = findCofactorPairs(model,metPairs);
     end
 else
-    smallMets = findSmallMets(model);
-    metPairs = findMPs_max(model,smallMets.smallMetIDs,true,delimiter);
-    cofPairs = findCofactorPairs_max(model,metPairs);
+    smallMets = findSmallMetsCarb(model);
+    metPairs = findMPs(model,smallMets.smallMetIDs,false,delimiter);
+    cofPairs = findCofactorPairs(model,metPairs);
 end
 
 % initialize variable
@@ -356,6 +413,11 @@ cofMetIDs = [];
 for i = 1:size(cofPairs,1)
     cof_tmp = cell2mat(cofPairs{i,6});
     cofMetIDs = [cofMetIDs;cof_tmp];
+end
+% retrieve all the metabolite IDs for cofactors
+for k = 1:size(cofPairs, 1)
+                          cofPairs{k, 5} = [cofPairs{k, 5}{:}];
+                          cofPairs{k, 6} = [cofPairs{k, 6}{:}];
 end
 
 % set cofMets to 0 in model.S
@@ -386,104 +448,43 @@ end
 minmax_new = minmax;
 mmAdj = zeros(num_rxns,2);
 reRun = 1;
+% counter = 0;
 while reRun
     for i = 1:num_rxns
-        % evaluate if rxn is part of the measured constraints
+        % evaluate if rxn is part of the measured constraints 
+        % rxns
         if ismember(i,varID_tmp)
             bericht{i,1} = 'set_bnd';
+            a{i,1}='exchange';
             continue
         elseif ismember(i,skipRxns)
             bericht{i,1} = 'skipped rxn';
+             a{i,1}='skipped';
             continue
-        else
-            % check if reaction carries flux under normal conditions
+        else %intracellurar reactions
+             % check if reaction carries flux under normal conditions
             if sum(abs(minmax(i,:))) == 0
                 bericht{i,1} = 'no_flux';
+                a{i,1}='no flux';
                 continue
             elseif ismember(i,isDrain)
                 bericht{i,1} = 'balanced - drain';
-                subIDs = find(model_tmp.S(:,i) < 0);
-                prodIDs = find(model_tmp.S(:,i) > 0);
+                subIDs = find(model.S(:,i) < 0);
+                prodIDs = find(model.S(:,i) > 0);
 
                 % account for stoichiometric coefficients and add up carbon
-                subCarbon = sum(abs(full(model_tmp.S(subIDs,i))).*metCarb(subIDs,1));
-                prodCarbon = sum(abs(full(model_tmp.S(prodIDs,i))).*metCarb(prodIDs,1));
+                subCarbon = sum(abs(full(model.S(subIDs,i))).*metCarb(subIDs,1));
+                prodCarbon = sum(abs(full(model.S(prodIDs,i))).*metCarb(prodIDs,1));
 
                 if subCarbon == 0 && prodCarbon == 0
+                    bericht{i,1} = 'carbon unconstrained';
                     continue
                 elseif subCarbon == 0
                     constraint = abs(total_carbon_cons/prodCarbon);
                 else
                     constraint = abs(total_carbon_cons/subCarbon);
                 end
-                if model_tmp.rev(i,1) == 1
-                    if abs(minmax(i,1)) > constraint
-                        minmax_new(i,1) = -constraint;
-                        mmAdj(i,1) = 1;
-                    end
-                    if abs(minmax(i,2)) > constraint
-                        minmax_new(i,2) = constraint;
-                        mmAdj(i,2) = 1;
-                    end
-                else
-                    if abs(minmax(i,2)) > constraint
-                        if constraint > abs(minmax(i,1))
-                            minmax_new(i,2) = constraint;
-                            mmAdj(i,2) = 1;
-                        end
-                    end
-                end            
-            else
-                % find substrates and products 
-                subIDs = find(model_tmp.S(:,i) < 0);
-                prodIDs = find(model_tmp.S(:,i) > 0);
-
-                % account for stoichiometric coefficients and add up carbon
-                subCarbon = sum(abs(full(model_tmp.S(subIDs,i))).*metCarb(subIDs,1));
-                prodCarbon = sum(abs(full(model_tmp.S(prodIDs,i))).*metCarb(prodIDs,1));
-
-                % subtract 21 carbons form total sub and prd carbon
-                % CoA = C21H32N7O16P3S
-                if ismember(i,coa.coaRxnIDs)
-                    if coa.missMatch
-                        warning('Stoichiometry of CoA is not matching. Smaller number is subtracted from carbon balance. Check reaction reaction manually.')
-                        if coa.prdCarbon(ismember(coa.coaRxnIDs,i)) > coa.subCarbon(ismember(coa.coaRxnIDs,i))
-                            subCarbon = subCarbon - coa.subCarbon(ismember(coa.coaRxnIDs,i));
-                            prodCarbon = prodCarbon - coa.subCarbon(ismember(coa.coaRxnIDs,i));
-                        else
-                            subCarbon = subCarbon - coa.prdCarbon(ismember(coa.coaRxnIDs,i));
-                            prodCarbon = prodCarbon - coa.prdCarbon(ismember(coa.coaRxnIDs,i));
-                        end
-                    else
-                        subCarbon = subCarbon - coa.subCarbon(ismember(coa.coaRxnIDs,i));
-                        prodCarbon = prodCarbon - coa.subCarbon(ismember(coa.coaRxnIDs,i));
-                    end
-                end            
-
-                if ismember(i,lrgMlc.lmRxnIDs)
-                    subCarbon = subCarbon - (lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i)));
-                    prodCarbon = prodCarbon - lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i));
-                end
-
-    %             
-    %           % add up carbons
-    %           subCarbon = sum(metCarb(subIDs));
-    %           prodCarbon = sum(metCarb(prodIDs));
-
-                if subCarbon == 0 && prodCarbon == 0
-                    bericht{i,1} = 'balanced';
-                    continue
-    %             elseif subCarbon == 0
-    %                 disp(strcat('carbon created in rxn ',num2str(i)));
-    %             elseif prodCarbon == 0
-    %                 disp(strcat('carbon drained in rxn ',num2str(i)));
-                end
-
-                % check carbon balancing
-                if subCarbon == prodCarbon
-                    bericht{i,1} = 'balanced';
-                    constraint = abs(total_carbon_cons/subCarbon);
-                    if model_tmp.rev(i,1) == 1
+                if model.qualDir(1,i) == 0 %bidirectional 
                         if abs(minmax(i,1)) > constraint
                             minmax_new(i,1) = -constraint;
                             mmAdj(i,1) = 1;
@@ -492,130 +493,278 @@ while reRun
                            minmax_new(i,2) = constraint;
                            mmAdj(i,2) = 1;
                         end
-                    else
-                        if abs(minmax(i,2)) > constraint
+                    
+                elseif model.qualDir(1,i) == 1 
+                    %unidirectional forward [0 - 100]
+                           if abs(minmax(i,2)) > constraint
                             if constraint > abs(minmax(i,1))
                                 minmax_new(i,2) = constraint;
                                 mmAdj(i,2) = 1;
                             end
-                        end
-                    end     
-                else % if carbon is not balanced
-                    % X_tmp = regexp(model.metFormulas(497),'X')
-                    X_sub = [];
-                    X_prod = [];
-                    for f = 1:(size(subIDs,1))
-                        X_sub(f,1) = count(model.metFormulas(subIDs(f,1)),'X');
-    %                     X_tmp = regexpi(model.metFormulas(subIDs(f,1)),'X');         
-    %                     if isnan(X_sub(f,1))
-    %                         X_sub(f,1) = 0;
-    %                     end
-                    end
-                    for f = 1:(size(prodIDs,1))
-                        X_prod(f,1) = count(model.metFormulas(prodIDs(f,1)),'X');
-                    end
-                    X_log = find([X_sub;X_prod]);
-
-                    if find(ismember(cofMetIDs,find(model.S(:,i))))
-                        if mod(sum([subCarbon;prodCarbon;metCarb(cofMetIDs...
-                            (ismember(cofMetIDs,find(model.S(:,i)))))]),2) == 0 % if the sum of all carbon is even then it is balanced (not bulletproof but if off by only one carbon it works)
-                            bericht{i,1} = 'balanced';
-                            if subCarbon > prodCarbon % if balanced then its go with the smaller one (constraining less). This is because there seems to be only 1 cofactor in this equation (e.g. atp -> amp, this is not picked up as a cofactor pair but atp is a cofactor) so the carbon of atp/amp should not be considered when constraining
-                                constraint = abs(total_carbon_cons/prodCarbon);
-                            else
-                                constraint = abs(total_carbon_cons/subCarbon);
-                            end
-                            if model_tmp.rev(i,1) == 1
-                                if abs(minmax(i,1)) > constraint
-                                    minmax_new(i,1) = -constraint;
-                                    mmAdj(i,1) = 1;
-                                end
-                                if abs(minmax(i,2)) > constraint
-                                   minmax_new(i,2) = constraint;
-                                   mmAdj(i,2) = 1;
-                                end
-                            else
-                                if abs(minmax(i,2)) > constraint
-                                    if constraint > abs(minmax(i,1))
-                                        minmax_new(i,2) = constraint;
-                                        mmAdj(i,2) = 1;
-                                    end
-                                end
-                            end
-                        else
-                            bericht{i,1} = 'unbalanced - CofPair';
-                            if subCarbon < prodCarbon % if unbalanced then go with the smaller one (constraining less)
-                                constraint = abs(total_carbon_cons/subCarbon);
-                            else
-                                constraint = abs(total_carbon_cons/prodCarbon);
-                            end
-                            if model_tmp.rev(i,1) == 1
-                                if abs(minmax(i,1)) > constraint
-                                    minmax_new(i,1) = -constraint;
-                                    mmAdj(i,1) = 1;
-                                end
-                                if abs(minmax(i,2)) > constraint
-                                   minmax_new(i,2) = constraint;
-                                   mmAdj(i,2) = 1;
-                                end
-                            else
-                                if abs(minmax(i,2)) > constraint
-                                    if constraint > abs(minmax(i,1))
-                                        minmax_new(i,2) = constraint;
-                                        mmAdj(i,2) = 1;
-                                    end
-                                end
-                            end
-                        end
-                    else
-                        bericht{i,1} = 'unbalanced';
-                        if subCarbon < prodCarbon % if unbalanced then go with the smaller one (constraining less)
-                            constraint = abs(total_carbon_cons/subCarbon);
-                        else
-                            constraint = abs(total_carbon_cons/prodCarbon);
-                        end
-                        if model_tmp.rev(i,1) == 1
-                            if abs(minmax(i,1)) > constraint
+                          end
+                    
+                
+                elseif model.qualDir(1,i) == -1 
+                    %unidirectional backwords [-100 - 0]
+                        if abs(minmax(i,1)) > constraint
+                            if constraint > abs(minmax(i,2))
                                 minmax_new(i,1) = -constraint;
                                 mmAdj(i,1) = 1;
                             end
-                            if abs(minmax(i,2)) > constraint
-                               minmax_new(i,2) = constraint;
-                               mmAdj(i,2) = 1;
+                        end
+                 end
+            else
+                % find substrates and products 
+                subIDs = find(model.S(:,i) < 0);
+                prodIDs = find(model.S(:,i) > 0);
+
+                % account for stoichiometric coefficients and add up carbon
+                subCarbon(i) = sum(abs(full(model.S(subIDs,i))).*metCarb(subIDs,1));
+                prodCarbon(i) = sum(abs(full(model.S(prodIDs,i))).*metCarb(prodIDs,1));
+
+
+                          %detection of cofactor pairs in the reaction
+                           found = false(size(cofPairs, 1), 1);
+                           for k = 1:size(cofPairs, 1)
+                               found(k) = any(cofPairs{k, 5} == i);
+                           end
+                           cofrow=find(found);
+                           
+                           
+                           round=0;
+                 if ~isempty(cofrow)
+                 a{i,1}='cofactor pairs identified';
+                 subcofids=[];
+                 prodcofids=[];
+                       for m = 1:size(cofrow, 1)  
+                         round = round + 1;
+                         arr{round,1} = subIDs(ismember(subIDs,cofPairs{cofrow(m,1), 6} )); %cofactor reactants
+                         arr{round,2} =prodIDs(ismember(prodIDs,cofPairs{cofrow(m,1), 6})); %cofactor products
+                                
+                        for j = 1:size(arr{round,1},1)
+                           subCofids=arr{round,1};
+                        end
+                        subcofids = [subcofids;subCofids];
+                       
+                        for j = 1:size(arr{round,2},1)
+                           prodCofids=arr{round,2};
+                        end
+                        prodcofids = [prodcofids;prodCofids];
+                        end
+                             
+                       subcofids=unique(subcofids);
+                       prodcofids=unique(prodcofids);
+                       
+                       cofsubCarbon=sum(abs(full(model.S(subcofids,i))).*metCarb(subcofids,1));
+                       cofprodCarbon=sum(abs(full(model.S(prodcofids,i))).*metCarb(prodcofids,1));
+                       
+                        %check if subCarbon of cofactor reactants equal to prodCarbon of cofactor reactants
+                            if cofsubCarbon > cofprodCarbon %more cofactor reactants  than cofactor products, constraining less
+                                subCarbon(i) = subCarbon(i) - cofprodCarbon;
+                                prodCarbon(i) = prodCarbon(i) - cofprodCarbon;
+                           else
+                                subCarbon(i) = subCarbon(i) - cofsubCarbon;
+                                prodCarbon(i) = prodCarbon(i) - cofsubCarbon;
                             end
-                        else
-                            if abs(minmax(i,2)) > constraint
-                                if constraint > abs(minmax(i,1))
-                                    minmax_new(i,2) = constraint;
-                                    mmAdj(i,2) = 1;
-                                end
+                    
+                  else
+                     a{i,1}='cofactor pairs not identified';
+                  end
+            
+
+                % subtract 21 carbons form total sub and prd carbon
+                % CoA = C21H32N7O16P3S
+                if ismember(i,coa.coaRxnIDs)
+                     %check if subCarbon of coa reactants equal to prodCarbon of coa reactants
+                     %Smaller number is subtracted from carbon balance
+                        if coa.prdCarbon(ismember(coa.coaRxnIDs,i)) > coa.subCarbon(ismember(coa.coaRxnIDs,i))
+                            subCarbon(i) = subCarbon(i) - coa.subCarbon(ismember(coa.coaRxnIDs,i));
+                            prodCarbon(i) = prodCarbon(i) - coa.subCarbon(ismember(coa.coaRxnIDs,i));
+                        elseif coa.prdCarbon(ismember(coa.coaRxnIDs,i)) < coa.subCarbon(ismember(coa.coaRxnIDs,i))
+                            subCarbon(i) = subCarbon(i) - coa.prdCarbon(ismember(coa.coaRxnIDs,i));
+                            prodCarbon(i) = prodCarbon(i) - coa.prdCarbon(ismember(coa.coaRxnIDs,i));
+                       
+                    else %subcarbon=prodcarbon 
+                        subCarbon(i) = subCarbon(i) - coa.subCarbon(ismember(coa.coaRxnIDs,i));
+                        prodCarbon(i) = prodCarbon(i) - coa.subCarbon(ismember(coa.coaRxnIDs,i));
+                        end
+                end
+                          
+
+               % subtrac lrgMlcs   
+                if ismember(i,lrgMlc.lmRxnIDs)
+                    %check if subCarbon of lrgMlc reactants equal to prodCarbon of lrgMlc reactants
+                     %Smaller number is subtracted from carbon balance
+                        if lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i)) > lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i))
+                            subCarbon(i) = subCarbon(i) - lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i));
+                            prodCarbon(i) = prodCarbon(i) - lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i));
+                        elseif lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i)) < lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i))
+                               subCarbon(i) = subCarbon(i) - lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i));
+                            prodCarbon(i) = prodCarbon(i) - lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i));
+                       
+                    else
+                    subCarbon(i) = subCarbon(i) - (lrgMlc.subCarbon(ismember(lrgMlc.lmRxnIDs,i)));
+                    prodCarbon(i) = prodCarbon(i) - lrgMlc.prdCarbon(ismember(lrgMlc.lmRxnIDs,i));
+                        end
+                   
+                end
+
+              
+
+                if subCarbon(i) == 0 && prodCarbon(i) == 0
+                    bericht{i,1} = 'carbon unconstrained';
+                    continue
+                end
+
+                   % check carbon balancing
+                if subCarbon(i) == prodCarbon(i)
+                    bericht{i,1} = 'balanced';
+                     
+                  if ismember(i,CBBRxns) 
+                      %if a Calvin cycle reaction under autotrophic conditions
+                       constraint = 6*abs(total_carbon_cons/subCarbon(i));
+                  else 
+                    constraint = abs(total_carbon_cons/subCarbon(i));
+                  end
+                  
+                    if model.qualDir(1,i) == 0 %bidirectional
+                        if abs(minmax(i,1)) > constraint
+                            minmax_new(i,1) = -constraint;
+                            bericht{i,1} = 'constrained-balanced';
+                            mmAdj(i,1) = 1;
+                        end
+                        if abs(minmax(i,2)) > constraint
+                           minmax_new(i,2) = constraint;
+                           bericht{i,1} = 'constrained-balanced';
+                           mmAdj(i,2) = 1;
+                        end
+                    
+                    elseif model.qualDir(1,i) == 1 
+                        %unidirectional forward [0 - 100]
+                        if abs(minmax(i,2)) > constraint
+                            if constraint > abs(minmax(i,1))
+                                minmax_new(i,2) = constraint;
+                                bericht{i,1} = 'constrained-balanced';
+                                mmAdj(i,2) = 1;
+                            end
+                        end
+                    
+                
+                    elseif model.qualDir(1,i) == -1 
+                        %unidirectional backwords [-100 - 0]
+                        if abs(minmax(i,1)) > constraint
+                            if constraint > abs(minmax(i,2))
+                                minmax_new(i,1) = -constraint;
+                                bericht{i,1} = 'constrained-balanced';
+                                mmAdj(i,1) = 1;
                             end
                         end
                     end
-                end
-            end
+                        
+                else % if carbon is not balanced          
+                        bericht{i,1} = 'unbalanced';
+                        
+                        if subCarbon(i) < prodCarbon(i) % if unbalanced then go with the smaller one (constraining less)
+                               
+                            if ismember(i,CBBRxns)
+                                %if a Calvin cycle reaction under autotrophic conditions
+                                constraint = 6*abs(total_carbon_cons/subCarbon(i));
+                     
+                            else 
+                            constraint = abs(total_carbon_cons/subCarbon(i));
+                            end
+                            
+                        else
+                            if ismember(i,CBBRxns)
+                                %if a Calvin cycle reaction under autotrophic conditions
+                                constraint = 6*abs(total_carbon_cons/prodCarbon(i));
+
+                            else
+                            constraint = abs(total_carbon_cons/prodCarbon(i));
+                             end
+                         end
+                    
+                       if model.qualDir(1,i) == 0 %bidirectional
+                        if abs(minmax(i,1)) > constraint
+                            minmax_new(i,1) = -constraint;
+                            bericht{i,1} = 'constrained-unbalanced';
+                            mmAdj(i,1) = 1;
+                        end
+                        if abs(minmax(i,2)) > constraint
+                           minmax_new(i,2) = constraint;
+                           bericht{i,1} = 'constrained-unbalanced';
+                           mmAdj(i,2) = 1;
+                        end
+                    
+                       elseif model.qualDir(1,i) == 1 
+                           %unidirectional forward [0 - 100]
+                            if abs(minmax(i,2)) > constraint
+                            if constraint > abs(minmax(i,1))
+                                minmax_new(i,2) = constraint;
+                                bericht{i,1} = 'constrained-unbalanced';
+                                mmAdj(i,2) = 1;
+                            end
+                        end
+                    
+                
+                       elseif model.qualDir(1,i) == -1 
+                           %unidirectional backwords [-100 - 0]
+                            if abs(minmax(i,1)) > constraint
+                            if constraint > abs(minmax(i,2))
+                                minmax_new(i,1) = -constraint;
+                                bericht{i,1} = 'constrained-unbalanced';
+                                mmAdj(i,1) = 1;
+                            
+                            end
+                            end 
+                       end  
+                end 
+            end    
         end
+        progressbar(i/num_rxns) 
     end
+    
 
     % test if model solves under new conditions
     model.lb = minmax_new(:,1);
     model.ub = minmax_new(:,2);
+    try 
     sol = optimizeCbModel(model,'max');
-
-    if ismember(cellstr(sol.origStat),{'INFEASIBLE'})
-        if rlxBnds
-            warning('Model does not solve!')
-            rlxVal = rlxVal + rlxInt;
-            total_carbon_cons = total_carbon_cons * rlxVal;
-            reRun = 1;
-        else
-            error('Model does not solve!. Think about relaxing the bounds.')
-        end
-    else
+    catch 
+        error('The drain reactions bounds that you imposed are possibly unbalanced');
+    end 
+    sol_cc = sol;
+    
+    
+      % flag to check for infeasibillity
+      flag = isnan(sol.f); %infeasible solution 
+          
+      
+      if flag == true  
+       if rlxBnds           
+                  
+          %If true and carbon constraints do not solve due to too      
+          %tight constraints, algorithm will increase total carbon       
+          %consumed based on relaxInt (relaxation interval) which        
+          %is a percentage. 
+          
+          warning('Model does not solve!')
+          rlxVal = rlxVal + rlxInt; 
+           %rlxVal=1 (1 = 100%)
+           %rlxInt = percentage step totalCarbon will be increased/ relaxed 
+           %in case the model does not solve after carbon constraining. Default = 0.1 (i.e. 10%)
+           
+          total_carbon_cons = intotal_carbon_cons * rlxVal;
+          reRun = 1;
+       else 
+           error('Model does not solve!. Think about relaxing the bounds.')
+       end
+     else 
+        %feasible solution
         disp(strcat('model solves. sol.x =',' ',num2str(sol.f)))
         reRun = 0;
-    end
-end
+     end 
+end 
 
 
 %% qunatify how much solution space was constraint compared to original minmax
@@ -723,7 +872,7 @@ end
 if runFinalMinMax
     model.lb = minmax_new(:,1);
     model.ub = minmax_new(:,2);
-    minmax_post_new = runMinMax_GF(model);
+    minmax_post_new = runMinMax(model);
     minmax_post_new = fixMinMax(minmax_post_new);
     carbonConst.postNmm = '*** post new minmax ***';
     carbonConst.postNewMinMax = minmax_post_new;
@@ -736,13 +885,46 @@ if runFinalMinMax
     model.lb = minmax_post_new(:,1);
     model.ub = minmax_post_new(:,2);
     sol = optimizeCbModel(model,'max');
-
+    % find the rxnID that changed after final minmax
+    id_lower = find((minmax_new(:,1) - minmax_post_new(:,1)>0));
+    id_upper = find((minmax_new(:,2) - minmax_post_new(:,2)>0));
+    id_tmp = vertcat(id_lower,id_upper);
+    id = sort(unique(id_tmp));
+    %initialize vars
+    infeas = {};
+    infeas_ID = [];
     if isempty(sol.f)
         warning('model does not solve. think about relaxing the bounds')
-    else
+    end 
+
+    if SearchProb_rxns  % Here we search for reactions that create infeasibillity after constraining with CCFBA.  We do that by constraining reactions one by one.
+     if sol.f < sol_cc.f
+        warning('Objective Value decreased: searching for reactions that might cause the problem')
+        c =0;
+    
+     for i = 1:length(id)
+        model.lb = minmax_new(:,1);
+        model.ub = minmax_new(:,2);
+        model.lb(i) = minmax_post_new(i,1);
+        model.ub(i) = minmax_post_new(i,2);
+    
+        sol_post = optimizeCbModel(model);
+        if sol_post.f < sol_cc.f
+         c=c+1;
+         infeas(c,1) = model.rxnNames(i);
+         infeas_ID(c,1) = i;
+      
+        end 
+        progressbar(i/length(id))
+     end
+     end 
+    carbonConst.Problematic_rxns = infeas;
+    carbonConst.Problematic_rxns_ID = infeas_ID;
+    end 
+     else
         disp(strcat('model solves. sol.x =',' ',num2str(sol.f)))
-    end
+ end
 
     carbonConst.solutionPostNew = sol;
+    
 end
-

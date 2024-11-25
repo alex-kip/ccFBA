@@ -7,7 +7,7 @@ function [model,isDrain] = resetModel(model,bnd,rev,zeroRxns)
 %   *************************************************
 %
 % INPUTS
-%   model   =   cobra model (needs model.rev,model.lb and model.ub fields)
+%   model   =   cobra model (needs model.qualDir,model.lb and model.ub fields)
 %
 %   bnd     =   any value to which you would like to set the
 %               maximum/minimum bnds

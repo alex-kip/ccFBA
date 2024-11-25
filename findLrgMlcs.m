@@ -46,9 +46,20 @@ trgtRxns = C(valCount>1);
 
 % find logical vector for transportRxns
 isTrans  = findTransports(model);
+% find antiport rxns
+model_tmp = model;
+model_tmp.S(lrgIDs,:) = 0;
+isAntiport = findTransports(model_tmp);
 
-%retrieve actual reactions containing electron transferring mlcls
-lrgMlcRxns= trgtRxns(~ismember(trgtRxns,find(isTrans)));
+%retrieve actual reactions containing electron transferring mlcls +
+%antiports
+lrgMlcRxns_1= trgtRxns(~ismember(trgtRxns,find(isTrans)));
+lrgMlcRxns_2 = find(ismember(trgtRxns,find(isAntiport)));
+lrgMlcRxns = vertcat(lrgMlcRxns_1,trgtRxns(lrgMlcRxns_2));
+lrgMlcRxns = sort(unique(lrgMlcRxns(:)));
+
+
+
 
 for i = 1:size(lrgMlcRxns,1)
     % find substrate and product IDs
