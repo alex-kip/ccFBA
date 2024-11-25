@@ -1,5 +1,5 @@
 # ccFBA (Updated November 2024)
-Toolbox that performs carbon constraining on constraint-based metabolic models.
+An addon for the COBRA toolbox that robustly constrains intracellular reactions in Genome Scale Metabolic Models based on the elemental balance of carbon.
 
 Details regarding this toolbox can be found in the following article
 "Improving the accuracy of flux balance analysis through the implementation of carbon availability constraints for intracellular reactions"
